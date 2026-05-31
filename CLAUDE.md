@@ -107,23 +107,28 @@ GET_SYSTEM_FLAG  ("offline",       &iOfflineFlag);
 GET_TESTSUITE_NAME(sTestsuiteName);
 ```
 
-### 3.2 结果变量必须是数组并提前初始化
+### 3.2 结果变量：static ARRAY_D，在 ON_FIRST_INVOCATION 里 init(0)
 
-多 site 下禁止用标量保存结果（会被覆盖，只剩最后一个 site 的值）：
+- 必须用 `static ARRAY_D`，保证跨 site 执行时数组不被销毁
+- `init(0)` 放在 `ON_FIRST_INVOCATION_BEGIN()` 里，只初始化一次
+- 禁止用标量（会被每个 site 覆盖，只剩最后一个 site 的值）
 
 ```cpp
-ARRAY_D Result;
-Result.resize(GET_SITE_COUNT());
-Result = 0.0;
+static ARRAY_D Result;   // run() 开头声明，static 保留跨 site 数据
 ```
 
-### 3.3 ON_FIRST_INVOCATION —— 只放硬件采集
+### 3.3 ON_FIRST_INVOCATION —— 初始化数组 + 硬件采集
 
-`ON_FIRST_INVOCATION_BEGIN()` ~ `ON_FIRST_INVOCATION_END()` 只执行一次，
-**只放**硬件动作：
+`ON_FIRST_INVOCATION_BEGIN()` ~ `ON_FIRST_INVOCATION_END()` 只执行一次，放：
+
+- 结果数组 `init(0)`
+- `CONNECT()`
+- `RDI_BEGIN()` ... `RDI_END()`：pattern、MCE/DC/DGT 采集
 
 ```cpp
 ON_FIRST_INVOCATION_BEGIN();
+
+    Result.init(0);      // 数组初始化清零
 
     CONNECT();
     RDI_BEGIN();
@@ -138,26 +143,23 @@ ON_FIRST_INVOCATION_END();
 
 **禁止**在此块内：
 - 放 `FOR_EACH_SITE` 循环
-- 声明后续外部要用的变量（出了 END 即失效）
+- 声明后续外部还要用的变量（出了 END 即失效）
 - 放 `getValue` / 数据分析 / `judgeAndLog`
 
-### 3.4 FOR_EACH_SITE —— 放在外面做数据分析
+### 3.4 ON_FIRST_INVOCATION 外面 —— 按 site 读数据 / 判断
 
-数据分析与判断放在 `ON_FIRST_INVOCATION_END()` 之后：
+`run()` 本身就是按 site 逐个执行的，**不需要 FOR_EACH_SITE**，
+直接用 `CURRENT_SITE_NUMBER()` 取当前 site：
 
 ```cpp
-FOR_EACH_SITE_BEGIN();
+int site = CURRENT_SITE_NUMBER();
 
-    int site = CURRENT_SITE_NUMBER();
+Result[site] = rdi.id("captureName").getValue(PinName);
 
-    Result[site] = rdi.id("captureName").getValue(PinName);
+// DSP 计算 / 自定义运算
 
-    // DSP 计算 / 自定义运算
-
-    TESTSET().cont(true).judgeAndLog_ParametricTest(
-        sTestsuiteName, "LimitName", "LimitName", tmLimits, Result[site]);
-
-FOR_EACH_SITE_END();
+TESTSET().cont(true).judgeAndLog_ParametricTest(
+    sTestsuiteName, "LimitName", "LimitName", tmLimits, Result[site]);
 ```
 
 ---
@@ -190,14 +192,17 @@ rdi.dc("dcMeas").pin(MeasPin).vMeas().execute();        // Measure
 
 ```
 run() 开头
-├── 变量声明 / flag 读取 / 结果数组初始化
+├── 变量声明 / flag 读取
+└── static ARRAY_D Result 声明
 
 ON_FIRST_INVOCATION（只跑 1 次）
+├── Result.init(0)        ← 数组初始化
 ├── CONNECT
 └── RDI pattern + MCE 采集触发（所有 site 同时）
 
-FOR_EACH_SITE（每 site 各跑 1 次）
-├── getValue 读各自数据
+ON_FIRST_INVOCATION 外面（每 site 各跑 1 次，无需 FOR_EACH_SITE）
+├── CURRENT_SITE_NUMBER() 取当前 site
+├── getValue 读当前 site 数据存入 Result[site]
 ├── DSP / 自定义计算
 └── judgeAndLog 判断写 Datalog
 ```
