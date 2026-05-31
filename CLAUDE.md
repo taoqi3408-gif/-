@@ -146,17 +146,39 @@ ON_FIRST_INVOCATION_END();
 - 声明后续外部还要用的变量（出了 END 即失效）
 - 放 `getValue` / 数据分析 / `judgeAndLog`
 
-### 3.4 ON_FIRST_INVOCATION 外面 —— 按 site 读数据 / 判断
+### 3.4 FOR_EACH_SITE —— 配合 ON_FIRST_INVOCATION 在里面使用
 
-`run()` 本身就是按 site 逐个执行的，**不需要 FOR_EACH_SITE**，
-直接用 `CURRENT_SITE_NUMBER()` 取当前 site：
+`FOR_EACH_SITE_BEGIN/END` 用在 `ON_FIRST_INVOCATION` **内部**，
+当需要在只执行一次的块里对每个 site 做数据分析时使用：
+
+```cpp
+ON_FIRST_INVOCATION_BEGIN();
+
+    Result.init(0);
+
+    CONNECT();
+    RDI_BEGIN();
+        // 硬件采集
+    RDI_END();
+
+    // 需要在 ON_FIRST_INVOCATION 里做数据分析时，用 FOR_EACH_SITE
+    FOR_EACH_SITE_BEGIN();
+
+        int site = CURRENT_SITE_NUMBER();
+        Result[site] = rdi.id("captureName").getValue(PinName);
+        // DSP 计算 / 自定义运算
+
+    FOR_EACH_SITE_END();
+
+ON_FIRST_INVOCATION_END();
+```
+
+### 3.5 ON_FIRST_INVOCATION 外面 —— 按 site 判断
+
+`run()` 本身按 site 逐个执行，外面直接用 `CURRENT_SITE_NUMBER()` 取当前 site 做判断：
 
 ```cpp
 int site = CURRENT_SITE_NUMBER();
-
-Result[site] = rdi.id("captureName").getValue(PinName);
-
-// DSP 计算 / 自定义运算
 
 TESTSET().cont(true).judgeAndLog_ParametricTest(
     sTestsuiteName, "LimitName", "LimitName", tmLimits, Result[site]);
@@ -200,9 +222,14 @@ ON_FIRST_INVOCATION（只跑 1 次）
 ├── CONNECT
 └── RDI pattern + MCE 采集触发（所有 site 同时）
 
-ON_FIRST_INVOCATION 外面（每 site 各跑 1 次，无需 FOR_EACH_SITE）
+ON_FIRST_INVOCATION 内（只跑 1 次）
+├── Result.init(0)
+├── CONNECT + RDI pattern + MCE 采集
+└── FOR_EACH_SITE（需要逐 site 数据分析时）
+    ├── getValue 读各 site 数据存入 Result[site]
+    └── DSP / 自定义计算
+
+ON_FIRST_INVOCATION 外面（每 site 各跑 1 次）
 ├── CURRENT_SITE_NUMBER() 取当前 site
-├── getValue 读当前 site 数据存入 Result[site]
-├── DSP / 自定义计算
 └── judgeAndLog 判断写 Datalog
 ```
