@@ -1,0 +1,7 @@
+services:
+  stdf-analyzer:
+    build: .
+    container_name: stdf-analyzer
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
