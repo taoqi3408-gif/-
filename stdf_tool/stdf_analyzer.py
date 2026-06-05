@@ -375,6 +375,128 @@ class STDFAnalyzer:
             "tnum":   m["tnum"], "tname": m["tname"],
         }
 
+    # ---------------------- Site-wise Stat (StdfAnalyzer 风格) ----------------------
+    def get_qty_statistic_by_site(self) -> pd.DataFrame:
+        """返回 Total/Pass/Fail/Abort/Null/Fresh/Retest QTY，按 All + 每个 Site 列出"""
+        sites = sorted(self.df_parts["site"].unique().tolist())
+        cols = ["All"] + [str(s) for s in sites]
+        total_all = len(self.df_parts)
+        pass_all = int(self.df_parts["pass"].sum())
+        fail_all = total_all - pass_all
+
+        rows = {
+            "Total QTY": [total_all] + [int((self.df_parts["site"]==s).sum()) for s in sites],
+            "Pass QTY":  [pass_all]  + [int(((self.df_parts["site"]==s) & self.df_parts["pass"]).sum()) for s in sites],
+            "Fail QTY":  [fail_all]  + [int(((self.df_parts["site"]==s) & ~self.df_parts["pass"]).sum()) for s in sites],
+            "Abort QTY": [0] * (1+len(sites)),
+            "Null QTY":  [0] * (1+len(sites)),
+            "Fresh QTY": [total_all] + [int((self.df_parts["site"]==s).sum()) for s in sites],
+            "Retest QTY":[0] * (1+len(sites)),
+        }
+        # 把数值变成 "n (xx.xx%)" 格式
+        out_rows = {}
+        totals = [total_all] + [int((self.df_parts["site"]==s).sum()) for s in sites]
+        for k, vals in rows.items():
+            out_rows[k] = [
+                f"{v:>4d}  {(v/totals[i]*100 if totals[i] else 0):>6.2f}%"
+                if k != "Total QTY" else f"{v:>4d}"
+                for i, v in enumerate(vals)
+            ]
+        df = pd.DataFrame(out_rows, index=cols).T
+        df.columns = cols
+        df.index.name = "Item"
+        return df
+
+    def _bin_by_site(self, bin_col: str, bin_defs: dict, name_key: str, pf_key: str) -> pd.DataFrame:
+        """通用：HBin 或 SBin 按 Site 分列"""
+        sites = sorted(self.df_parts["site"].unique().tolist())
+        df = self.df_parts.copy()
+        pivot = df.groupby([bin_col, "site"]).size().unstack(fill_value=0)
+        for s in sites:
+            if s not in pivot.columns: pivot[s] = 0
+        pivot["All"] = pivot[sites].sum(axis=1)
+        pivot = pivot.sort_values("All", ascending=False).reset_index()
+
+        totals_all = pivot["All"].sum()
+        totals_site = {s: int((df["site"]==s).sum()) for s in sites}
+
+        rows = []
+        for _, r in pivot.iterrows():
+            bn = r[bin_col]
+            info = bin_defs.get(bn, {})
+            pf = info.get(pf_key, "")
+            name = info.get(name_key, "")
+            row = {
+                "BinNum": int(bn) if pd.notna(bn) else None,
+                "Bin Name": f"{pf}:{name}" if pf or name else "",
+                "All": f"{int(r['All']):>5d}  {(r['All']/totals_all*100 if totals_all else 0):>6.2f}%",
+            }
+            for s in sites:
+                cnt = int(r[s])
+                t = totals_site[s]
+                row[f"Site {s}"] = f"{cnt:>5d}  {(cnt/t*100 if t else 0):>6.2f}%"
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    def get_sbin_by_site(self) -> pd.DataFrame:
+        return self._bin_by_site("sbin", self.sbr_defs, "SBIN_NAM", "SBIN_PF")
+
+    def get_hbin_by_site(self) -> pd.DataFrame:
+        return self._bin_by_site("hbin", self.hbr_defs, "HBIN_NAM", "HBIN_PF")
+
+    def get_test_list_with_passfail(self) -> pd.DataFrame:
+        """生成 StdfAnalyzer 风格的测试项总表：Idx/TestNumber/TestText/LL/UL/Unit/PassCnt/FailCnt"""
+        rows = []
+        for i, t in enumerate(self._test_meta):
+            c = t["col_idx"]
+            ex = int((self.fail_mat[:, c] != -1).sum())
+            fa = int((self.fail_mat[:, c] == 1).sum())
+            rows.append({
+                "Idx": i + 1,
+                "TestNumber": t["tnum"],
+                "TestText": t["tname"],
+                "LoLimit": t["ll"],
+                "HiLimit": t["ul"],
+                "Unit": t["units"],
+                "PassCnt": ex - fa,
+                "FailCnt": fa,
+            })
+        return pd.DataFrame(rows)
+
+    def get_basic_info_dict(self) -> dict:
+        """返回详细 Basic Info（Right Panel 用）"""
+        return {
+            "File Name":   self.mir.get("LOT_ID") and f"Lot {self.mir.get('LOT_ID')}" or "",
+            "Lot Number":  self.mir.get("LOT_ID", ""),
+            "Sub Lot":     self.mir.get("SBLOT_ID", ""),
+            "Date Code":   self.mir.get("DATE_COD", ""),
+            "Setup Time":  self._fmt_t(self.mir.get("SETUP_T")),
+            "Start Time":  self._fmt_t(self.mir.get("START_T")),
+            "Finish Time": self._fmt_t(self.mrr.get("FINISH_T")),
+            "Temperature": self.mir.get("TST_TEMP", ""),
+            "Node Name":   self.mir.get("NODE_NAM", ""),
+            "Tester Type": self.mir.get("TSTR_TYP", ""),
+            "Part Type":   self.mir.get("PART_TYP", ""),
+            "Job Name":    self.mir.get("JOB_NAM", ""),
+            "Exec Type":   self.mir.get("EXEC_TYP", ""),
+            "Exec Ver":    self.mir.get("EXEC_VER", ""),
+            "Test Code":   self.mir.get("TEST_COD", ""),
+            "ReTest Code": self.mir.get("RTST_COD", ""),
+            "Test Mode":   self.mir.get("MODE_COD", ""),
+            "Station ID":  self.mir.get("STAT_NUM", ""),
+            "Flow ID":     self.mir.get("FLOW_ID", ""),
+            "Operator":    self.mir.get("OPER_NAM", ""),
+            "Burn-In":     self.mir.get("BURN_TIM", ""),
+            "User Text":   self.mir.get("USER_TXT", ""),
+        }
+
+    def get_test_time_stats(self) -> tuple:
+        """返回 (test_time_total_ms, test_time_pass_only_total_ms) 用于 right panel"""
+        tt = self.df_parts["test_time_ms"].dropna()
+        tt_pass = self.df_parts[self.df_parts["pass"]]["test_time_ms"].dropna()
+        return (int(tt.mean()) if not tt.empty else 0,
+                int(tt_pass.mean()) if not tt_pass.empty else 0)
+
     def get_failed_parts_df(self) -> pd.DataFrame:
         df = self.df_parts[~self.df_parts["pass"]].copy()
         def join_fails(idx):

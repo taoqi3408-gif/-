@@ -1,6 +1,8 @@
 """
-STDF Analyzer - Streamlit Web UI
-启动方式: streamlit run app.py
+STDF Analyzer - StdfAnalyzer-Style 3-Pane Layout
+左：File 树 + Summary
+中：测试项表格 (Idx/TestNumber/TestText/LL/UL/Unit/PassCnt/FailCnt)
+右：Basic Info + Qty Statistic + Soft/Hard Bin Statistic
 """
 import io
 import os
@@ -14,16 +16,50 @@ import plotly.graph_objects as go
 from stdf_analyzer import STDFAnalyzer
 
 st.set_page_config(
-    page_title="STDF Analyzer",
+    page_title="StdfAnalyzer",
     page_icon="🔬",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
-# ===================== Cache wrapper =====================
+# ===== 紧凑专业风格 CSS =====
+st.markdown("""
+<style>
+.block-container { padding-top: 1rem; padding-bottom: 1rem; max-width: 100%; }
+.stDataFrame { font-size: 12px; }
+section[data-testid="stSidebar"] { display: none; }
+div[data-testid="stMetric"] { background-color: #f7f9fc; padding: 6px; border-radius: 4px; }
+div[data-testid="stMetricLabel"] { font-size: 11px; }
+div[data-testid="stMetricValue"] { font-size: 18px; }
+.basic-info-table { font-family: 'Consolas', monospace; font-size: 12px; }
+.basic-info-table td { padding: 2px 8px; border: none; }
+.basic-info-table td:first-child { color: #1f4e79; font-weight: 600; width: 110px; }
+hr { margin: 0.4rem 0; }
+.bin-stat-table { font-family: 'Consolas', monospace; font-size: 11px; }
+.bin-stat-table th { background-color: #305496; color: white; padding: 4px 6px; text-align: right; }
+.bin-stat-table td { padding: 2px 6px; border-bottom: 1px solid #eee; text-align: right; }
+.bin-stat-table td:first-child, .bin-stat-table td:nth-child(2) { text-align: left; }
+.bin-stat-table tr:hover { background-color: #f7f9fc; }
+.pass-row { background-color: #e2f0d9; }
+.fail-row { background-color: #fce4d6; }
+.menu-bar {
+    background: #f5f5f5; border-bottom: 1px solid #ddd;
+    padding: 4px 12px; font-size: 13px;
+    margin: -1rem -1rem 0.6rem -1rem;
+}
+.menu-bar span { margin-right: 18px; cursor: pointer; }
+.menu-bar span:hover { color: #1f77b4; }
+</style>
+<div class="menu-bar">
+<b>StdfAnalyzer</b> &nbsp;|&nbsp;
+<span>📁 File</span><span>🔗 Correlation</span><span>🔧 Tool</span><span>❓ Help</span>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ===================== 解析缓存 =====================
 @st.cache_resource(show_spinner=False)
 def parse_stdf_cached(file_bytes: bytes, name: str) -> STDFAnalyzer:
-    """缓存解析结果。基于文件 bytes hash 自动去重。"""
     suffix = ".stdf.gz" if name.endswith(".gz") else ".stdf"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
         f.write(file_bytes)
@@ -36,241 +72,253 @@ def parse_stdf_cached(file_bytes: bytes, name: str) -> STDFAnalyzer:
         try: os.unlink(path)
         except: pass
 
-# ===================== Sidebar =====================
-with st.sidebar:
-    st.title("🔬 STDF Analyzer")
-    st.caption("ATE 测试数据快速分析 · v0.1")
-    st.divider()
 
-    uploaded = st.file_uploader(
-        "📁 上传 STDF 文件",
-        type=["stdf", "gz"],
-        help="支持 .stdf 和 .stdf.gz（gzip 压缩）。大文件建议先压缩。"
+# ===================== 文件上传 =====================
+if "loaded" not in st.session_state:
+    st.session_state.loaded = False
+
+if not st.session_state.loaded:
+    st.markdown("### 📁 Open STDF File")
+    up = st.file_uploader(
+        "Drag and drop .stdf or .stdf.gz",
+        type=["stdf", "gz"], label_visibility="collapsed"
     )
-    if uploaded:
-        st.success(f"✓ {uploaded.name}\n{uploaded.size/1024/1024:.1f} MB")
+    if up is None:
+        st.info("Please upload an STDF file to begin analysis.")
+        st.stop()
+    file_bytes = up.getvalue()
+    file_name = up.name
+    with st.spinner(f"Parsing {file_name} ({up.size/1024/1024:.1f} MB)..."):
+        analyzer = parse_stdf_cached(file_bytes, file_name)
+    st.session_state.loaded = True
+    st.session_state.analyzer = analyzer
+    st.session_state.file_name = file_name
+    st.rerun()
+else:
+    analyzer: STDFAnalyzer = st.session_state.analyzer
+    file_name = st.session_state.file_name
 
-    st.divider()
-    st.caption("💡 解析大文件（>100MB）需要 1-2 分钟，首次解析后会缓存。")
-    st.caption("🔗 源码：`stdf_tool/` 目录")
 
-# ===================== Main =====================
-if not uploaded:
-    st.title("🔬 STDF Analyzer")
-    st.markdown("""
-    Upload an STDF file from your ATE (V93000 / Teradyne / etc.) to get instant analysis:
+# ===================== 3 栏布局 =====================
+left, mid, right = st.columns([1.0, 2.4, 2.6], gap="small")
 
-    - **Yield by Site** — site 良率对比，找 site-specific 失效
-    - **HBin / SBin Pareto** — 失效模式分布
-    - **Top Failing Tests** — Cp / Cpk / Fail rate 排行
-    - **Test Drilldown** — 单个测试的参数分布 + site 对比
-    - **Failed Parts** — 失效 die 清单 + 每颗失效测试明细
-    - **Excel Export** — 一键导出多 sheet 分析报告
 
-    👈 **请在左侧上传 STDF 文件开始。**
-    """)
-    st.stop()
+# --------------- 左栏 ---------------
+with left:
+    # File tree
+    st.markdown(f"""
+<div style="font-size:12px; font-family:monospace; background:#fff; border:1px solid #ddd; padding:6px;">
+<b>📂 File_1</b>: {file_name[:38]}{'...' if len(file_name)>38 else ''}<br>
+&nbsp;&nbsp;▸ Site List<br>
+&nbsp;&nbsp;&nbsp;&nbsp;{ ' / '.join([f'Site {s}' for s in analyzer.get_kpi()['sites']]) }<br>
+&nbsp;&nbsp;<b>Filter_0</b>: ALL
+</div>
+""", unsafe_allow_html=True)
 
-# Parse with progress
-file_bytes = uploaded.getvalue()
-with st.spinner(f"解析 {uploaded.name} ({uploaded.size/1024/1024:.1f} MB)... 大文件可能需要 1-2 分钟"):
-    analyzer = parse_stdf_cached(file_bytes, uploaded.name)
+    tab_sum, tab_filter = st.tabs(["File Summary", "Filter Setup"])
 
-kpi = analyzer.get_kpi()
+    with tab_sum:
+        kpi = analyzer.get_kpi()
+        st.markdown(f"""
+<table class="basic-info-table" style="width:100%">
+<tr><td>Lot Number:</td><td>{kpi['lot_id']}</td></tr>
+<tr><td>Setup Time:</td><td>{kpi['start'][:19]}</td></tr>
+<tr><td>Start Time:</td><td>{kpi['start'][:19]}</td></tr>
+<tr><td>Finish Time:</td><td>{kpi['finish'][:19]}</td></tr>
+</table>
+<hr>
+<b>Qty Statistic</b>
+<table class="basic-info-table" style="width:100%">
+<tr><td>Total QTY:</td><td>{kpi['total']:,}</td></tr>
+<tr><td>Pass QTY:</td><td>{kpi['pass']:,} ({kpi['pass']/kpi['total']*100:.2f}%)</td></tr>
+<tr style="color:#c00"><td>Fail QTY:</td><td>{kpi['fail']:,} ({kpi['fail']/kpi['total']*100:.2f}%)</td></tr>
+<tr><td>Abort QTY:</td><td>0 (0.00%)</td></tr>
+<tr><td>Null QTY:</td><td>0 (0.00%)</td></tr>
+<tr><td>Fresh QTY:</td><td>{kpi['total']:,} (100.00%)</td></tr>
+<tr><td>Retest QTY:</td><td>0 (0.00%)</td></tr>
+</table>
+<hr>
+<b>Test Time</b>
+<table class="basic-info-table" style="width:100%">
+<tr><td>Avg Test Time:</td><td>{analyzer.get_test_time_stats()[0]:,} ms</td></tr>
+<tr><td>Pass Only:</td><td>{analyzer.get_test_time_stats()[1]:,} ms</td></tr>
+</table>
+""", unsafe_allow_html=True)
 
-# Header KPI
-st.title(f"📊 {kpi['lot_id']} · {kpi['part']}")
-st.caption(f"Job: `{kpi['job']}` · Tester: `{kpi['tester']} ({kpi['node']})` · {kpi['start']} → {kpi['finish']}")
+    with tab_filter:
+        st.markdown("**Filter Setup**")
+        site_filter = st.multiselect("Sites", kpi['sites'], default=kpi['sites'])
+        pf_filter = st.radio("Pass/Fail", ["All","Pass Only","Fail Only"], horizontal=True)
+        st.session_state.site_filter = site_filter
+        st.session_state.pf_filter = pf_filter
 
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("Total Parts", f"{kpi['total']:,}")
-c2.metric("Pass", f"{kpi['pass']:,}")
-c3.metric("Fail", f"{kpi['fail']:,}", delta=f"-{kpi['fail']/kpi['total']*100:.2f}%", delta_color="inverse")
-yield_color = "normal" if kpi['yield']>=95 else ("inverse" if kpi['yield']<80 else "off")
-c4.metric("Yield", f"{kpi['yield']:.2f}%")
-c5.metric("Unique Tests", f"{kpi['n_tests']:,}")
-c6.metric("Sites", len(kpi['sites']))
+    if st.button("🔄 Reload File", use_container_width=True):
+        st.session_state.loaded = False
+        st.rerun()
 
-st.divider()
 
-# ============== Tabs ==============
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "🎯 Yield by Site", "📊 Bin Pareto", "🔥 Top Fail Tests",
-    "🔍 Test Drilldown", "💀 Failed Parts", "📋 Lot Info", "📥 Export"
-])
+# --------------- 中栏：测试项表 ---------------
+with mid:
+    file_tabs = st.tabs([f"📄 {file_name[:24]}", "🔍 Filter_0"])
 
-# --- Tab 1: Site Yield ---
-with tab1:
-    df = analyzer.get_site_yield()
-    col_l, col_r = st.columns([2, 1])
-    with col_l:
-        fig = px.bar(df, x="site", y="Yield(%)", text="Yield(%)",
-                     color="Yield(%)", color_continuous_scale="RdYlGn",
-                     range_color=[max(0, df["Yield(%)"].min()-5), 100],
-                     title="Yield by Site")
-        fig.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
-        fig.add_hline(y=kpi["yield"], line_dash="dash", line_color="black",
-                      annotation_text=f"Overall {kpi['yield']:.2f}%")
-        fig.update_yaxes(range=[max(0, df["Yield(%)"].min()-10), 102])
-        st.plotly_chart(fig, use_container_width=True)
-    with col_r:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+    with file_tabs[0]:
+        # 工具栏图标按钮
+        btn_cols = st.columns(8)
+        view_mode = st.session_state.get("view_mode", "table")
+        if btn_cols[0].button("📋 Table", help="测试列表"):       st.session_state.view_mode = "table"
+        if btn_cols[1].button("📊 Bar",   help="失效柱状图"):     st.session_state.view_mode = "bar"
+        if btn_cols[2].button("📈 Hist",  help="参数直方图"):     st.session_state.view_mode = "hist"
+        if btn_cols[3].button("🔵 Scatter",help="参数散点"):      st.session_state.view_mode = "scatter"
+        if btn_cols[4].button("🌡️ Heat",  help="Site×Test 热图"): st.session_state.view_mode = "heat"
+        if btn_cols[5].button("💾 Export",help="导出 Excel"):     st.session_state.view_mode = "export"
 
-    # Site x HBin 堆叠
-    st.subheader("Site × HBin Distribution")
-    pivot = analyzer.df_parts.groupby(["site","hbin_name"]).size().unstack(fill_value=0)
-    pivot_long = pivot.reset_index().melt(id_vars="site", var_name="HBin", value_name="Count")
-    fig2 = px.bar(pivot_long, x="site", y="Count", color="HBin",
-                  title="Site × HBin Stacked")
-    st.plotly_chart(fig2, use_container_width=True)
+        view_mode = st.session_state.get("view_mode", "table")
 
-# --- Tab 2: Bin Pareto ---
-with tab2:
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.subheader("HardBin Pareto")
-        dfh = analyzer.get_hbin_pareto()
-        fig = px.bar(dfh, x="Name", y="Count", color="P/F",
-                     color_discrete_map={"P":"#2ecc71","F":"#e74c3c"},
-                     text="Count", title="HBin Distribution")
-        fig.update_traces(textposition="outside")
-        st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(dfh, use_container_width=True, hide_index=True)
+        if view_mode == "table":
+            df = analyzer.get_test_list_with_passfail()
+            search = st.text_input("🔍 Filter", placeholder="filter by test number / name...", label_visibility="collapsed")
+            if search:
+                m = (df["TestText"].str.contains(search, case=False, na=False) |
+                     df["TestNumber"].astype(str).str.contains(search, na=False))
+                df = df[m]
+            st.caption(f"{len(df)} tests")
+            st.dataframe(df, use_container_width=True, hide_index=True, height=720,
+                column_config={
+                    "Idx":        st.column_config.NumberColumn(width="small"),
+                    "TestNumber": st.column_config.NumberColumn(width="small"),
+                    "TestText":   st.column_config.TextColumn(width="medium"),
+                    "LoLimit":    st.column_config.NumberColumn(format="%.4g", width="small"),
+                    "HiLimit":    st.column_config.NumberColumn(format="%.4g", width="small"),
+                    "Unit":       st.column_config.TextColumn(width="small"),
+                    "PassCnt":    st.column_config.NumberColumn(width="small"),
+                    "FailCnt":    st.column_config.NumberColumn(width="small"),
+                })
 
-    with col_b:
-        st.subheader("SoftBin Pareto (Fail Only, Top 15)")
-        dfs = analyzer.get_sbin_pareto()
-        dfs_f = dfs[dfs["P/F"]=="F"].head(15)
-        fig = px.bar(dfs_f, x="Name", y="Count", text="Count",
-                     color="Count", color_continuous_scale="Reds",
-                     title="SBin Fail Distribution")
-        fig.update_traces(textposition="outside")
-        fig.update_layout(xaxis_tickangle=-30)
-        st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(dfs, use_container_width=True, hide_index=True)
-
-# --- Tab 3: Top Fail Tests ---
-with tab3:
-    n = st.slider("Top N failing tests", 10, 200, 50, 10)
-    df_top = analyzer.get_top_failing_tests(n)
-    st.dataframe(df_top, use_container_width=True, hide_index=True,
-                 column_config={
-                     "FailRate(%)": st.column_config.ProgressColumn(
-                         "FailRate(%)", min_value=0, max_value=20, format="%.2f%%"),
-                     "Cp":  st.column_config.NumberColumn(format="%.3f"),
-                     "Cpk": st.column_config.NumberColumn(format="%.3f"),
-                 })
-
-    st.subheader("Site × Test Failure Rate Heatmap")
-    df_sxt = analyzer.get_site_x_test(n=30)
-    if not df_sxt.empty:
-        # 取 site fail rate 列
-        site_cols = [c for c in df_sxt.columns if c.startswith("S") and "FailRate" in c]
-        mat = df_sxt[site_cols].values
-        ylabels = [f"T{r['TestNum']} · {r['TestName'][:40]}" for _, r in df_sxt.iterrows()]
-        fig = go.Figure(data=go.Heatmap(
-            z=mat, x=site_cols, y=ylabels,
-            colorscale="RdYlGn_r",
-            text=np.where(np.isnan(mat.astype(float)), "", np.round(mat.astype(float), 2)),
-            texttemplate="%{text}", colorbar_title="Fail %"))
-        fig.update_layout(height=max(400, 25*len(ylabels)),
-                          title="Top 30 Failing Tests × Site")
-        st.plotly_chart(fig, use_container_width=True)
-
-# --- Tab 4: Test Drilldown ---
-with tab4:
-    st.subheader("Test Distribution Drilldown")
-    # 搜索框
-    search = st.text_input("🔎 Search test by number or name", placeholder="e.g. RX_GOOD or 54000")
-    df_cat = analyzer.df_catalog.copy()
-    if search:
-        mask = (df_cat["TestName"].str.contains(search, case=False, na=False) |
-                df_cat["TestNum"].astype(str).str.contains(search, na=False))
-        df_cat = df_cat[mask]
-    options = df_cat.head(500)
-    if options.empty:
-        st.warning("No matching tests.")
-    else:
-        labels = [f"T{r['TestNum']} · {r['TestName'][:60]} (n={r['N_Exec']}, fail={r['N_Fail']})"
-                  for _, r in options.iterrows()]
-        idx = st.selectbox("Select a test", range(len(labels)), format_func=lambda i: labels[i])
-        col_idx = int(options.iloc[idx]["ColIdx"])
-        data = analyzer.get_test_values(col_idx)
-        vals = data["values"]
-        sites = data["sites"]
-        ll, ul = data["ll"], data["ul"]
-        valid_mask = ~np.isnan(vals)
-
-        cstats1, cstats2, cstats3, cstats4 = st.columns(4)
-        if valid_mask.sum() > 0:
-            v = vals[valid_mask]
-            cstats1.metric("N Valid", f"{valid_mask.sum():,}")
-            cstats2.metric("Mean", f"{v.mean():.4g}")
-            cstats3.metric("Std", f"{v.std(ddof=1):.4g}" if len(v) > 1 else "—")
-            cstats4.metric("Limits", f"[{ll}, {ul}]" if (ll is not None and ul is not None) else f"LL={ll}, UL={ul}")
-
-            # 分布直方图 by site
-            df_plot = pd.DataFrame({"value": v, "site": [f"S{s}" for s in sites[valid_mask]]})
-            fig = px.histogram(df_plot, x="value", color="site", barmode="overlay",
-                               opacity=0.55, nbins=80,
-                               title=f"T{data['tnum']} · {data['tname']}",
-                               labels={"value": data["units"] or "value"})
-            if ll is not None:
-                fig.add_vline(x=ll, line_dash="dash", line_color="red",
-                              annotation_text=f"LL={ll}")
-            if ul is not None:
-                fig.add_vline(x=ul, line_dash="dash", line_color="red",
-                              annotation_text=f"UL={ul}")
+        elif view_mode == "bar":
+            df = analyzer.get_top_failing_tests(30)
+            df_plot = df.copy()
+            df_plot["Label"] = df_plot.apply(lambda r: f"T{r['TestNum']} · {r['TestName'][:30]}", axis=1)
+            fig = px.bar(df_plot.sort_values("N_Fail"), y="Label", x="N_Fail",
+                         orientation="h", title="Top 30 Failing Tests",
+                         text="FailRate(%)", color="FailRate(%)",
+                         color_continuous_scale="Reds")
+            fig.update_layout(height=720, yaxis_title="", xaxis_title="Fail Count")
             st.plotly_chart(fig, use_container_width=True)
 
-            # Box plot by site
-            fig2 = px.box(df_plot, x="site", y="value", color="site",
-                          title="Per-Site Distribution (Box)",
-                          labels={"value": data["units"] or "value"})
-            if ll is not None: fig2.add_hline(y=ll, line_dash="dash", line_color="red")
-            if ul is not None: fig2.add_hline(y=ul, line_dash="dash", line_color="red")
-            st.plotly_chart(fig2, use_container_width=True)
-        else:
-            st.warning("No valid numerical data for this test.")
+        elif view_mode == "hist":
+            df_cat = analyzer.df_catalog
+            search = st.text_input("Search test", placeholder="e.g. RX_GOOD or 54000")
+            opt = df_cat[df_cat["TestName"].str.contains(search, case=False, na=False) |
+                          df_cat["TestNum"].astype(str).str.contains(search, na=False)] if search else df_cat.head(500)
+            if not opt.empty:
+                labels = [f"T{r['TestNum']} · {r['TestName'][:50]} (fail={r['N_Fail']})" for _, r in opt.iterrows()]
+                idx = st.selectbox("Test", range(len(labels)), format_func=lambda i: labels[i])
+                col_idx = int(opt.iloc[idx]["ColIdx"])
+                data = analyzer.get_test_values(col_idx)
+                vals = data["values"]; sites = data["sites"]
+                valid = ~np.isnan(vals)
+                if valid.sum() > 0:
+                    df_plot = pd.DataFrame({"value": vals[valid], "site": [f"S{s}" for s in sites[valid]]})
+                    fig = px.histogram(df_plot, x="value", color="site", barmode="overlay",
+                                       opacity=0.6, nbins=80,
+                                       title=f"T{data['tnum']} · {data['tname']}",
+                                       labels={"value": data["units"] or ""})
+                    if data["ll"] is not None: fig.add_vline(x=data["ll"], line_dash="dash", line_color="red")
+                    if data["ul"] is not None: fig.add_vline(x=data["ul"], line_dash="dash", line_color="red")
+                    fig.update_layout(height=640)
+                    st.plotly_chart(fig, use_container_width=True)
 
-# --- Tab 5: Failed Parts ---
-with tab5:
-    df_fp = analyzer.get_failed_parts_df()
-    st.metric("Failed Parts Count", f"{len(df_fp):,}")
-    st.dataframe(df_fp, use_container_width=True, hide_index=True)
-    csv_bytes = df_fp.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ Download Failed Parts CSV", csv_bytes,
-                       file_name=f"failed_parts_{kpi['lot_id']}.csv",
-                       mime="text/csv")
+        elif view_mode == "scatter":
+            df_cat = analyzer.df_catalog
+            search = st.text_input("Search test", placeholder="e.g. RX_GOOD or 54000", key="scatter_search")
+            opt = df_cat[df_cat["TestName"].str.contains(search, case=False, na=False) |
+                          df_cat["TestNum"].astype(str).str.contains(search, na=False)] if search else df_cat.head(500)
+            if not opt.empty:
+                labels = [f"T{r['TestNum']} · {r['TestName'][:50]}" for _, r in opt.iterrows()]
+                idx = st.selectbox("Test", range(len(labels)), format_func=lambda i: labels[i], key="scatter_sel")
+                col_idx = int(opt.iloc[idx]["ColIdx"])
+                data = analyzer.get_test_values(col_idx)
+                vals = data["values"]; sites = data["sites"]
+                valid = ~np.isnan(vals)
+                if valid.sum() > 0:
+                    df_plot = pd.DataFrame({
+                        "die_idx": np.where(valid)[0],
+                        "value": vals[valid],
+                        "site": [f"S{s}" for s in sites[valid]],
+                    })
+                    fig = px.scatter(df_plot, x="die_idx", y="value", color="site",
+                                     title=f"T{data['tnum']} · {data['tname']} (per die)",
+                                     labels={"value": data["units"] or ""})
+                    if data["ll"] is not None: fig.add_hline(y=data["ll"], line_dash="dash", line_color="red")
+                    if data["ul"] is not None: fig.add_hline(y=data["ul"], line_dash="dash", line_color="red")
+                    fig.update_layout(height=640)
+                    st.plotly_chart(fig, use_container_width=True)
 
-# --- Tab 6: Lot Info ---
-with tab6:
-    col_l, col_r = st.columns(2)
-    with col_l:
-        st.subheader("MIR (Master Information Record)")
-        mir_show = {k: v for k, v in analyzer.mir.items()
-                    if v not in (None, "", " ", 65535, 0)}
-        st.json(mir_show)
-    with col_r:
-        st.subheader("MRR (Master Result Record)")
-        st.json(analyzer.mrr)
-        st.subheader("SDR (Site Description)")
-        st.json(analyzer.sdr)
+        elif view_mode == "heat":
+            df_sxt = analyzer.get_site_x_test(40)
+            if not df_sxt.empty:
+                site_cols = [c for c in df_sxt.columns if c.startswith("S") and "FailRate" in c]
+                mat = df_sxt[site_cols].values.astype(float)
+                yl = [f"T{r['TestNum']} · {r['TestName'][:35]}" for _, r in df_sxt.iterrows()]
+                fig = go.Figure(data=go.Heatmap(
+                    z=mat, x=site_cols, y=yl, colorscale="RdYlGn_r",
+                    text=np.round(mat, 2), texttemplate="%{text}", colorbar_title="Fail %"))
+                fig.update_layout(height=max(500, 22*len(yl)),
+                                  title="Top 40 Failing Tests × Site")
+                st.plotly_chart(fig, use_container_width=True)
 
-# --- Tab 7: Export ---
-with tab7:
-    st.subheader("Export Excel Report")
-    st.write("生成多 sheet 分析 Excel（Summary / Yield / Bin / Top Fail / Site×Test / Failed Parts ...）")
-    if st.button("🚀 Generate Excel Report", type="primary"):
-        with st.spinner("Generating Excel..."):
-            buf = io.BytesIO()
-            analyzer.export_excel(buf)
-            buf.seek(0)
-            st.success(f"✓ Excel generated ({len(buf.getvalue())/1024:.1f} KB)")
-            st.download_button(
-                "⬇️ Download Excel",
-                data=buf.getvalue(),
-                file_name=f"STDF_Report_{kpi['lot_id']}_{kpi['part']}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-            )
+        elif view_mode == "export":
+            st.markdown("**Generate Excel Report (8 sheets)**")
+            if st.button("🚀 Generate", type="primary"):
+                buf = io.BytesIO()
+                with st.spinner("Building..."):
+                    analyzer.export_excel(buf)
+                st.download_button(
+                    "⬇️ Download Excel",
+                    data=buf.getvalue(),
+                    file_name=f"STDF_Report_{analyzer.mir.get('LOT_ID','x')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                )
+
+
+# --------------- 右栏：Basic Info + Bin Statistic ---------------
+with right:
+    # Basic Info
+    info = analyzer.get_basic_info_dict()
+    st.markdown("**Basic Info**")
+    rows_html = "".join(
+        f"<tr><td>{k}:</td><td>{v}</td></tr>" for k, v in info.items() if v not in (None, "", " ")
+    )
+    st.markdown(f"""<table class="basic-info-table" style="width:100%">{rows_html}</table>""",
+                unsafe_allow_html=True)
+
+    st.markdown("<hr><b>Qty Statistic</b>", unsafe_allow_html=True)
+    # 渲染 site-wise qty 表
+    df_qty = analyzer.get_qty_statistic_by_site()
+    qty_html = df_qty.to_html(classes="bin-stat-table", border=0)
+    st.markdown(qty_html, unsafe_allow_html=True)
+
+    st.markdown("<hr><b>Soft Bin Statistic</b>", unsafe_allow_html=True)
+    df_sbin = analyzer.get_sbin_by_site()
+    sbin_rows_html = ""
+    for _, r in df_sbin.iterrows():
+        cls = "pass-row" if str(r["Bin Name"]).startswith("P:") else "fail-row" if str(r["Bin Name"]).startswith("F:") else ""
+        cells = "".join(f"<td>{r[c]}</td>" for c in df_sbin.columns)
+        sbin_rows_html += f'<tr class="{cls}">{cells}</tr>'
+    header = "".join(f"<th>{c}</th>" for c in df_sbin.columns)
+    st.markdown(
+        f'<table class="bin-stat-table" style="width:100%"><thead><tr>{header}</tr></thead>'
+        f'<tbody>{sbin_rows_html}</tbody></table>', unsafe_allow_html=True)
+
+    st.markdown("<hr><b>Hard Bin Statistic</b>", unsafe_allow_html=True)
+    df_hbin = analyzer.get_hbin_by_site()
+    hbin_rows_html = ""
+    for _, r in df_hbin.iterrows():
+        cls = "pass-row" if str(r["Bin Name"]).startswith("P:") else "fail-row" if str(r["Bin Name"]).startswith("F:") else ""
+        cells = "".join(f"<td>{r[c]}</td>" for c in df_hbin.columns)
+        hbin_rows_html += f'<tr class="{cls}">{cells}</tr>'
+    header = "".join(f"<th>{c}</th>" for c in df_hbin.columns)
+    st.markdown(
+        f'<table class="bin-stat-table" style="width:100%"><thead><tr>{header}</tr></thead>'
+        f'<tbody>{hbin_rows_html}</tbody></table>', unsafe_allow_html=True)
