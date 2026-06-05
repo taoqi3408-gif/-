@@ -1,0 +1,11 @@
+[server]
+maxUploadSize = 500
+maxMessageSize = 500
+runOnSave = false
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#1f77b4"
